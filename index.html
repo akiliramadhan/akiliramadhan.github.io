@@ -1420,7 +1420,7 @@ function projectId(){try{if(typeof firebaseConfig!=='undefined'&&firebaseConfig.
 async function restSet(uid,id,tx){
  var u=null;try{u=(typeof fbAuth!=='undefined'&&fbAuth&&fbAuth.currentUser)||APP.currentUser;}catch(e){}
  if(!u||typeof u.getIdToken!=='function')throw{code:'rest-network'};
- var token=await race(u.getIdToken(),10000);
+ var token;try{token=await race(u.getIdToken(),10000);}catch(e0){throw{code:(e0&&e0.code==='timeout')?'timeout-token':'rest-network'};}
  var url='https://firestore.googleapis.com/v1/projects/'+projectId()+'/databases/(default)/documents/users/'+encodeURIComponent(uid)+'/txSafeguard/'+encodeURIComponent(id);
  var ctl=(typeof AbortController!=='undefined')?new AbortController():null;
  var to=setTimeout(function(){try{if(ctl)ctl.abort();}catch(e){}},20000);
@@ -1429,7 +1429,7 @@ async function restSet(uid,id,tx){
   r=await fetch(url,{method:'PATCH',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({fields:toFS(tx).mapValue.fields}),signal:ctl?ctl.signal:undefined});
  }catch(e){
   clearTimeout(to);
-  if(e&&e.name==='AbortError')throw{code:'timeout'};
+  if(e&&e.name==='AbortError')throw{code:'timeout-rest'};
   throw{code:'rest-network'};
  }
  clearTimeout(to);
@@ -1445,7 +1445,7 @@ async function sendOne(uid,it){
  catch(e){
   if(!e||e.code!=='rest-network')throw e;
  }
- await race(fbDb.collection('users').doc(uid).collection('txSafeguard').doc(it.id).set(tx),15000);
+ try{await race(fbDb.collection('users').doc(uid).collection('txSafeguard').doc(it.id).set(tx),15000);}catch(e3){throw(e3&&e3.code==='timeout')?{code:'timeout-sdk'}:e3;}
  lastVia='SDK';
 }
 function add(tx){if(!tx||!tx.id)return;var q=load();if(q.some(function(i){return i.id===tx.id;}))return;q.push(mk(tx));save(q);render();setTimeout(function(){flush(false);},400);}
@@ -1469,7 +1469,7 @@ async function flush(manual){
     try{txFastAcked(it.id);}catch(e0){}
    }catch(e){
     var c=codeOf(e);lastErr=c;failItem(it.id,c);
-    if(PERM.test(c)||c==='timeout')break;
+    if(PERM.test(c)||/^timeout/.test(c))break;
    }
   }
  }catch(e){lastErr=codeOf(e);}
@@ -1483,7 +1483,10 @@ function explain(c){
  if(/permission/i.test(c))return'Sheria za Firebase zinakataa kuandika (permission-denied)';
  if(/exhausted|quota/i.test(c))return'Kikomo cha bure cha Firebase kimeisha (resource-exhausted)';
  if(/unauthenticated/i.test(c))return'Umetoka kwenye akaunti — ingia tena (unauthenticated)';
- if(c==='timeout')return'Mtandao ni mzito, haukujibu kwa sekunde 15 (timeout)';
+ if(c==='timeout-token')return'Kupata tokeni ya akaunti kumechelewa zaidi ya sekunde 10 (timeout-token)';
+ if(c==='timeout-rest')return'Ombi la HTTPS kwenda Firestore halikujibu kwa sekunde 20 (timeout-rest)';
+ if(c==='timeout-sdk')return'SDK ya Firebase haikujibu kwa sekunde 15 (timeout-sdk)';
+ if(c==='timeout')return'Haikujibu kwa wakati (timeout)';
  if(/unavailable/i.test(c))return'Seva ya Firebase haipatikani kwa sasa (unavailable)';
  return c;
 }
@@ -1493,6 +1496,22 @@ function backup(){
  var q=load(),text='AKILI-NAKALA '+JSON.stringify(q.map(function(i){return i.tx;}));
  if(navigator.share){navigator.share({title:'Nakala ya miamala',text:text}).catch(function(){});return;}
  try{navigator.clipboard.writeText(text).then(function(){try{showToast('Nakala imenakiliwa');}catch(e){}});}catch(e){try{showToast('Nakala haikuweza kushirikiwa');}catch(e2){}}
+}
+
+async function runTest(box){
+ var out=[];function show(){box.textContent=out.join('\n');}
+ box.textContent='Inapima… (inaweza kuchukua hadi dakika 1)';
+ function f(url,opts){var ctl=new AbortController(),to=setTimeout(function(){ctl.abort();},20000);opts=opts||{};opts.signal=ctl.signal;return fetch(url,opts).then(function(r){clearTimeout(to);return r;},function(e){clearTimeout(to);throw(e&&e.name==='AbortError')?{code:'ilizidi sekunde 20'}:e;});}
+ async function step(label,fn){var t0=Date.now(),res;try{res=await fn();}catch(e){res='KOSA: '+codeOf(e);}out.push(label+': '+((Date.now()-t0)/1000).toFixed(1)+'s ('+res+')');show();}
+ var u=null;try{u=(typeof fbAuth!=='undefined'&&fbAuth&&fbAuth.currentUser)||APP.currentUser;}catch(e){}
+ var token=null,uid=(APP.dataOwnerUid||(APP.currentUser&&APP.currentUser.uid)||'x');
+ await step('1) Google (gstatic)',function(){return f('https://www.gstatic.com/generate_204',{mode:'no-cors',cache:'no-store'}).then(function(){return'sawa';});});
+ await step('2) Seva ya Firestore',function(){return f('https://firestore.googleapis.com/',{mode:'no-cors',cache:'no-store'}).then(function(){return'sawa';});});
+ await step('3) Tokeni ya akaunti',async function(){if(!u||!u.getIdToken)return'hakuna akaunti';token=await race(u.getIdToken(),20000);return'sawa';});
+ await step('4) Ombi la Firestore',async function(){if(!token)return'imerukwa';var r=await f('https://firestore.googleapis.com/v1/projects/'+projectId()+'/databases/(default)/documents/users/'+encodeURIComponent(uid)+'/txSafeguard/_ping',{headers:{Authorization:'Bearer '+token},cache:'no-store'});return'HTTP '+r.status;});
+ out.push('');
+ out.push('Tafsiri: 1 na 2 polepole au zinashindwa = tatizo la mtandao wa simu (DNS au kampuni ya simu). 1 na 2 haraka lakini 3 au 4 polepole = tatizo la Firebase au akaunti. HTTP 404 ni kawaida (inamaanisha ombi lilifika). HTTP 403 = sheria za Firebase zinakataa.');
+ show();
 }
 function openPanel(){
  closePanel();var q=load();
@@ -1505,11 +1524,13 @@ function openPanel(){
  if(lastErr&&q.length)card.appendChild(el('div','font-size:13px;background:#3a2a10;color:#ffd48a;border-radius:10px;padding:8px 10px;margin-bottom:8px;','Kosa la mwisho: '+explain(lastErr)));
  q.slice(0,8).forEach(function(i){var t=i.tx||{};card.appendChild(el('div','font-size:12.5px;opacity:.85;padding:4px 0;border-bottom:1px solid #232a35;',[t.type,t.mtandao,t.kiasi?('TSh '+t.kiasi):'',t.tarehe,t.muda].filter(Boolean).join(' • ')+(i.err?('  ['+i.err+']'):'')));});
  var row=el('div','display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;');
+ var res=el('div','font-size:12.5px;margin-top:10px;line-height:1.5;white-space:pre-wrap;color:#cfe3ff;','');
  function btn(label,bg,fn){var b=el('button','flex:1;min-width:120px;padding:12px;border:0;border-radius:12px;font-weight:800;font-size:14px;color:#fff;background:'+bg+';',label);b.addEventListener('click',fn);row.appendChild(b);}
  btn('🔄 Tuma Upya Sasa','#1d6fa5',function(){try{showToast('Inatuma…');}catch(e){}flush(true).then(function(){openPanel();});});
  btn('📤 Nakala (Shiriki)','#2e7d4f',backup);
+ btn('🧪 Pima Mtandao','#6b4fa0',function(){runTest(res);});
  btn('Funga','#3a4150',closePanel);
- card.appendChild(row);ov.appendChild(card);document.body.appendChild(ov);
+ card.appendChild(row);card.appendChild(res);ov.appendChild(card);document.body.appendChild(ov);
 }
 function render(){
  try{
